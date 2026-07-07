@@ -1,0 +1,111 @@
+spring:
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:all}
+  application:
+    name: pix-platform
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:pix}
+    username: ${DB_USER:pix}
+    password: ${DB_PASSWORD:pix}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        retries: 5
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: pix-worker
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: RECORD
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        pix.processing.duration: true
+        pix.partner.call.duration: true
+
+# Which beans register is controlled by the active Spring profile: "api" (REST + outbox
+# relay), "worker" (Kafka consumers only), "all" (both — local dev convenience, not how
+# this is deployed at scale). See application-api.yml / -worker.yml / -all.yml.
+app:
+  kafka:
+    replication-factor: ${KAFKA_REPLICATION_FACTOR:1}
+    pix-requested-partitions: ${KAFKA_PIX_REQUESTED_PARTITIONS:12}
+    consumer-error-backoff-interval-ms: ${KAFKA_CONSUMER_BACKOFF_MS:2000}
+    consumer-error-max-attempts: ${KAFKA_CONSUMER_MAX_ATTEMPTS:4}
+  outbox:
+    relay-fixed-delay-ms: ${OUTBOX_RELAY_FIXED_DELAY_MS:200}
+  partner:
+    latency-ms: ${PARTNER_LATENCY_MS:2000}
+    failure-rate: ${PARTNER_FAILURE_RATE:0.15}
+    permanent-rejection-share: ${PARTNER_PERMANENT_REJECTION_SHARE:0.2}
+    call-timeout-ms: ${PARTNER_CALL_TIMEOUT_MS:5000}
+    executor-pool-size: ${PARTNER_EXECUTOR_POOL_SIZE:20}
+
+resilience4j:
+  retry:
+    instances:
+      partnerFi:
+        max-attempts: 3
+        wait-duration: 300ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        randomized-wait-factor: 0.5
+        retry-exceptions:
+          - com.fintech.pix.partner.TransientPartnerException
+        ignore-exceptions:
+          - com.fintech.pix.partner.PartnerRejectedException
+  circuitbreaker:
+    instances:
+      partnerFi:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 5
+        record-exceptions:
+          - com.fintech.pix.partner.TransientPartnerException
+        ignore-exceptions:
+          - com.fintech.pix.partner.PartnerRejectedException
+
+logging:
+  pattern:
+    console: "%d{ISO8601} %-5level [%X{transactionId}] [%thread] %logger{36} - %msg%n"
