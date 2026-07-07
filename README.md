@@ -1,29 +1,78 @@
+<div align="center">
+
 # PIX Platform
 
-Plataforma de processamento de transações PIX, redesenhada para reduzir a latência percebida
-pelo cliente (de ~4s P95 síncronos para uma resposta em dezenas de milissegundos) e para
-escalar de forma independente entre ingestão e processamento. Contexto completo, decisões e
-trade-offs em [`docs/decisions-and-tradeoffs.md`](docs/decisions-and-tradeoffs.md); diagramas
-em [`docs/architecture.md`](docs/architecture.md).
+**Processamento de transações PIX assíncrono, idempotente e escalável.**
 
-## Stack
+De **~4s P95 síncronos** para uma resposta em **dezenas de milissegundos**, sem alterar a
+integração com a instituição financeira parceira.
 
-Java 21 · Spring Boot 3.3 · PostgreSQL (+ Flyway) · Apache Kafka (KRaft) · Resilience4j ·
-Micrometer/Prometheus/Grafana · Testcontainers.
+![Java](https://img.shields.io/badge/Java-21-orange?logo=openjdk&logoColor=white)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3-6DB33F?logo=springboot&logoColor=white)
+![Kafka](https://img.shields.io/badge/Kafka-KRaft-231F20?logo=apachekafka&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Resilience4j](https://img.shields.io/badge/Resilience4j-retry%20%2B%20circuit%20breaker-lightgrey)
+![Tests](https://img.shields.io/badge/tests-17%2F17%20passing-brightgreen)
+
+[Arquitetura](docs/architecture.md) · [Decisões & trade-offs](docs/decisions-and-tradeoffs.md)
+
+</div>
+
+---
+
+## Sumário
+
+- [Visão geral](#visão-geral)
+- [Como rodar](#como-rodar-docker-compose--caminho-principal)
+- [Testando o fluxo](#testando-o-fluxo)
+- [Cenário de falha / Dead Letter Topic](#forçando-o-cenário-de-falha--dead-letter-topic)
+- [Observabilidade](#observabilidade)
+- [Escalando workers](#escalando-workers)
+- [Papéis e escala](#papéis-e-escala)
+- [Rodando sem Docker](#rodando-localmente-sem-docker-opcional)
+- [Testes](#testes)
+- [Configuração](#configuração-relevante)
+- [Endpoints](#endpoints)
+
+---
+
+## Visão geral
+
+O fluxo atual (`API → Stored Procedure → App Legada → Core → Parceiro`) é inteiramente
+síncrono: o cliente espera a cadeia inteira, incluindo os ~2s do parceiro — que, por premissa,
+não podem ser alterados. Esta plataforma resolve isso desacoplando **ingestão** de
+**liquidação**: a API persiste a transação e responde na hora; um worker independente,
+com resiliência em duas camadas (Resilience4j + backoff do Kafka) e um Dead Letter Topic para
+falhas sustentadas, processa a chamada ao parceiro em segundo plano.
+
+Contexto completo — gargalos identificados, decisões arquiteturais e trade-offs — em
+[`docs/decisions-and-tradeoffs.md`](docs/decisions-and-tradeoffs.md); diagramas em
+[`docs/architecture.md`](docs/architecture.md).
+
+**Stack:** Java 21 · Spring Boot 3.3 · PostgreSQL + Flyway · Apache Kafka (KRaft) ·
+Resilience4j · Micrometer/Prometheus/Grafana · Testcontainers.
+
+---
 
 ## Como rodar (Docker Compose — caminho principal)
 
-Pré-requisito: Docker e Docker Compose.
+> **Pré-requisito:** Docker e Docker Compose.
 
 ```bash
 docker compose up -d --build
 ```
 
-Isso sobe: `postgres`, `kafka`, `pix-api` (porta `8080`), `pix-worker`, `prometheus`
-(porta `9090`) e `grafana` (porta `3000`, login anônimo como admin).
+| Serviço | Porta | Descrição |
+|---|---|---|
+| `pix-api` | `8080` | API REST + outbox relay |
+| `pix-worker` | — | consumer Kafka + chamada ao parceiro |
+| `postgres` | `5432` | banco de dados |
+| `kafka` | `29092` | broker (KRaft, sem Zookeeper) |
+| `prometheus` | `9090` | métricas |
+| `grafana` | `3000` | dashboards (login anônimo como admin) |
 
-`pix-api` e `pix-worker` são o mesmo artefato, diferenciados pela variável
-`SPRING_PROFILES_ACTIVE` (`api` / `worker`) — ver [Papéis e escala](#papéis-e-escala).
+`pix-api` e `pix-worker` são o **mesmo artefato**, diferenciados pela variável
+`SPRING_PROFILES_ACTIVE` — ver [Papéis e escala](#papéis-e-escala).
 
 ### Testando o fluxo
 
@@ -61,19 +110,21 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 ### Observabilidade
 
-- Métricas da aplicação: `curl localhost:8080/actuator/prometheus`
-- Prometheus (já com os alvos `pix-api`/`pix-worker` configurados): http://localhost:9090
-- Grafana (datasource Prometheus já provisionado): http://localhost:3000 — monte painéis a
+- **Métricas da aplicação:** `curl localhost:8080/actuator/prometheus`
+- **Prometheus** (alvos `pix-api`/`pix-worker` já configurados): http://localhost:9090
+- **Grafana** (datasource Prometheus já provisionado): http://localhost:3000 — monte painéis a
   partir de `pix_transactions_total`, `pix_processing_duration_seconds`,
   `pix_partner_call_duration_seconds`, `resilience4j_circuitbreaker_state`,
   `resilience4j_retry_calls_total` e as métricas de consumer lag do Kafka.
-- Health: `curl localhost:8080/actuator/health`
+- **Health:** `curl localhost:8080/actuator/health`
 
 ### Escalando workers
 
 ```bash
 docker compose up -d --scale pix-worker=3
 ```
+
+---
 
 ## Papéis e escala
 
@@ -82,6 +133,8 @@ docker compose up -d --scale pix-worker=3
 | `api` | REST (`POST`/`GET /pix`) + outbox relay | `pix-api` no compose |
 | `worker` | Consumer Kafka + chamada ao parceiro + resiliência | `pix-worker` no compose |
 | `all` | Ambos, no mesmo processo | conveniência para dev local / testes |
+
+---
 
 ## Rodando localmente sem Docker (opcional)
 
@@ -93,8 +146,10 @@ export DB_HOST=localhost KAFKA_BOOTSTRAP_SERVERS=localhost:29092 SPRING_PROFILES
 mvn spring-boot:run
 ```
 
-> Se o `java -version` da sua máquina não for 21 (`java -version` mostrando algo diferente
-> de 21.x), aponte `JAVA_HOME` para um JDK 21 antes de rodar o Maven.
+> Se o `java -version` da sua máquina não for 21.x, aponte `JAVA_HOME` para um JDK 21 antes
+> de rodar o Maven.
+
+---
 
 ## Testes
 
@@ -107,6 +162,8 @@ testes de integração com Testcontainers (`*IT.java`) que sobem Postgres e Kafk
 exercitam o fluxo completo: happy path (`RECEIVED → CONFIRMED`), idempotência de POST
 duplicado, 404 para transação inexistente, e o caminho de falha sustentada até
 `FAILED_RETRYABLE` via DLT. Requer Docker disponível (Testcontainers sobe os containers).
+
+---
 
 ## Configuração relevante
 
@@ -121,16 +178,43 @@ Todas com valor padrão em `application.yml`, sobrescrevíveis por variável de 
 | `OUTBOX_RELAY_FIXED_DELAY_MS` | `200` | intervalo do poller do outbox |
 | `KAFKA_CONSUMER_MAX_ATTEMPTS` | `4` | tentativas do container Kafka antes do DLT |
 
+---
+
 ## Endpoints
 
-```
-POST /pix
-  {"transactionId": "tx-123456", "amount": 150.75, "pixKey": "cliente@email.com", "description": "..."}
-  -> 202 Accepted (nova) | 200 OK (replay idempotente) | 409 Conflict (mesmo id, dados diferentes) | 400 Bad Request
+#### `POST /pix`
 
-GET /pix/{transactionId}
-  -> 200 OK {"transactionId", "status", "amount", "pixKey", "description", "failureReason", "createdAt", "updatedAt"}
-  -> 404 Not Found
+```json
+{
+  "transactionId": "tx-123456",
+  "amount": 150.75,
+  "pixKey": "cliente@email.com",
+  "description": "Pagamento de fatura"
+}
 ```
 
-`status` ∈ `RECEIVED`, `PROCESSING`, `CONFIRMED`, `FAILED`, `FAILED_RETRYABLE`.
+| Status | Significado |
+|---|---|
+| `202 Accepted` | nova transação, `status: RECEIVED` |
+| `200 OK` | replay idempotente do mesmo `transactionId` |
+| `409 Conflict` | mesmo `transactionId`, dados diferentes |
+| `400 Bad Request` | payload inválido |
+
+#### `GET /pix/{transactionId}`
+
+```json
+{
+  "transactionId": "tx-123456",
+  "status": "CONFIRMED",
+  "amount": 150.75,
+  "pixKey": "cliente@email.com",
+  "description": "Pagamento de fatura",
+  "failureReason": null,
+  "createdAt": "2026-07-07T19:26:22Z",
+  "updatedAt": "2026-07-07T19:26:25Z"
+}
+```
+
+`200 OK`, ou `404 Not Found` se o `transactionId` não existir.
+
+`status` ∈ `RECEIVED` → `PROCESSING` → `CONFIRMED` | `FAILED` | `FAILED_RETRYABLE`.
